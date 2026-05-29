@@ -5,6 +5,7 @@ import {
   maplibreGeoEditorPlugin,
   maplibreLayerControlPlugin,
   maplibreStreetViewPlugin,
+  maplibreSwipePlugin,
   PluginManager,
 } from "@geolibre/plugins";
 import type { MapController } from "@geolibre/map";
@@ -18,6 +19,7 @@ manager.registerAll([
   maplibreGeoAgentPlugin,
   maplibreGeoEditorPlugin,
   maplibreStreetViewPlugin,
+  maplibreSwipePlugin,
 ]);
 
 export function getPluginManager(): PluginManager {
@@ -59,6 +61,12 @@ export function createAppAPI(
       return id;
     },
     getActiveBasemap: () => useAppStore.getState().basemapStyleUrl,
+    onBasemapChange: (callback: (styleUrl: string) => void) =>
+      useAppStore.subscribe((state, prev) => {
+        if (state.basemapStyleUrl !== prev.basemapStyleUrl) {
+          callback(state.basemapStyleUrl);
+        }
+      }),
     addMapControl: (
       control: Parameters<MapController["addControl"]>[0],
       position?: Parameters<MapController["addControl"]>[1],
