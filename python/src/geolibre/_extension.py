@@ -46,8 +46,18 @@ def load_jupyter_server_extension(serverapp: Any) -> None:
         serverapp: The ``jupyter_server.serverapp.ServerApp`` instance passed by
             Jupyter Server when it loads the extension.
     """
+    import mimetypes
+
     from jupyter_server.utils import url_path_join
     from tornado.web import StaticFileHandler
+
+    # Guarantee the WebAssembly MIME type. The bundled app loads DuckDB-WASM
+    # (and others) via WebAssembly.instantiateStreaming, which requires an
+    # `application/wasm` Content-Type -- and the nosniff header below makes the
+    # browser enforce it strictly. Python 3.11+ ships this mapping, but a host
+    # whose mimetypes DB overrides it would otherwise serve `.wasm` as
+    # octet-stream and break spatial queries.
+    mimetypes.add_type("application/wasm", ".wasm")
 
     class _AppStaticHandler(StaticFileHandler):
         """Serve the bundled app's static files.
@@ -61,10 +71,18 @@ def load_jupyter_server_extension(serverapp: Any) -> None:
         ``default_filename`` kwarg passed below.
         """
 
+        def set_extra_headers(self, path: str) -> None:
+            # Defense in depth: the bundle is served from the Jupyter Server's
+            # authenticated origin, so block MIME sniffing that could coax a
+            # browser into executing a mistyped asset in that origin.
+            self.set_header("X-Content-Type-Options", "nosniff")
+
     web_app = serverapp.web_app
     base_url = web_app.settings["base_url"]
     route = url_path_join(base_url, APP_ROUTE, "(.*)")
-    bundle_present = _STATIC_APP.is_dir()
+    # Match ensure_bundle()'s index.html check (not a bare is_dir) so an empty
+    # bundle dir reports as missing rather than logging a misleading success.
+    bundle_present = (_STATIC_APP / "index.html").is_file()
     web_app.add_handlers(
         ".*$",
         [
