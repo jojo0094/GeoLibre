@@ -14,11 +14,13 @@ import {
 import {
   DEFAULT_BASEMAP,
   DEFAULT_LAYER_STYLE,
+  DEFAULT_LEGEND_CONFIG,
   DEFAULT_PROJECT_PREFERENCES,
   DEFAULT_STORY_MAP,
   type GeoLibreLayer,
   type GeoLibreProject,
   type LayerStyle,
+  type LegendConfig,
   type MapViewState,
   type ProjectPluginState,
   type ProjectPreferences,
@@ -97,6 +99,7 @@ export interface AppState {
   layers: GeoLibreLayer[];
   preferences: ProjectPreferences;
   projectPlugins: ProjectPluginState | null;
+  legend: LegendConfig;
   storymap: StoryMap | null;
   selectedLayerId: string | null;
   selectedFeatureId: string | null;
@@ -123,6 +126,7 @@ export interface AppState {
   setBasemapVisible: (visible: boolean) => void;
   setBasemapOpacity: (opacity: number) => void;
   setPreferences: (preferences: ProjectPreferences) => void;
+  setLegend: (legend: LegendConfig) => void;
   setProjectPlugins: (
     projectPlugins: ProjectPluginState | null,
     shouldMarkDirty?: boolean
@@ -226,6 +230,7 @@ export const useAppStore = create<AppState>()(
       layers: [],
       preferences: DEFAULT_PROJECT_PREFERENCES,
       projectPlugins: null,
+      legend: { ...DEFAULT_LEGEND_CONFIG },
       storymap: null,
       selectedLayerId: null,
       selectedFeatureId: null,
@@ -258,6 +263,7 @@ export const useAppStore = create<AppState>()(
       setBasemapOpacity: (opacity) =>
         set({ basemapOpacity: opacity, isDirty: true }),
       setPreferences: (preferences) => set({ preferences, isDirty: true }),
+      setLegend: (legend) => set({ legend, isDirty: true }),
       // When shouldMarkDirty is false the existing dirty flag is preserved rather
       // than set; it cannot clear the flag (only markSaved() does that).
       setProjectPlugins: (projectPlugins, shouldMarkDirty = true) =>

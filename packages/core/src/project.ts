@@ -1,12 +1,15 @@
 import {
   DEFAULT_BASEMAP,
   DEFAULT_LAYER_STYLE,
+  DEFAULT_LEGEND_CONFIG,
   DEFAULT_PROJECT_PREFERENCES,
   DEFAULT_STORY_MAP,
   PROJECT_VERSION,
   type GeoLibreLayer,
   type GeoLibreProject,
   type LayerStyle,
+  type LegendConfig,
+  type LegendItemOverride,
   type MapViewState,
   type ProjectPluginControlPosition,
   type ProjectPluginState,
@@ -51,6 +54,7 @@ export function createEmptyProject(
     layers: [],
     styles: {},
     preferences: DEFAULT_PROJECT_PREFERENCES,
+    legend: { ...DEFAULT_LEGEND_CONFIG },
     metadata: {},
   };
 }
@@ -75,8 +79,57 @@ export function parseProject(json: string): GeoLibreProject {
     styles: data.styles ?? {},
     preferences: normalizeProjectPreferences(data.preferences),
     plugins: normalizeProjectPlugins(data.plugins) ?? undefined,
+    legend: normalizeLegendConfig(data.legend),
     storymap: normalizeStoryMap(data.storymap) ?? undefined,
     metadata: data.metadata ?? {},
+  };
+}
+
+/**
+ * Coerce an untrusted (possibly hand-edited) legend config into a valid
+ * {@link LegendConfig}, dropping malformed entries. Returns undefined when no
+ * usable config is present so the default is applied downstream.
+ */
+function normalizeLegendConfig(legend: unknown): LegendConfig | undefined {
+  if (!legend || typeof legend !== "object") return undefined;
+  const candidate = legend as Partial<LegendConfig>;
+
+  const order = Array.isArray(candidate.order)
+    ? uniqueStrings(candidate.order)
+    : [];
+
+  const overrides: Record<string, LegendItemOverride> = {};
+  if (candidate.overrides && typeof candidate.overrides === "object") {
+    for (const [key, value] of Object.entries(candidate.overrides)) {
+      if (!key.trim() || !value || typeof value !== "object") continue;
+      const override = value as Partial<LegendItemOverride>;
+      const normalized: LegendItemOverride = {};
+      // Mirror setLegendItemLabel / renderedLabel: a blank or whitespace-only
+      // label is treated as "no override", so don't persist it.
+      if (typeof override.label === "string" && override.label.trim() !== "") {
+        normalized.label = override.label;
+      }
+      // Only the truthy hidden flag is meaningful; `hidden: false` is the
+      // default, so dropping it keeps round-tripped projects from accumulating
+      // no-op overrides (matches what the UI mutations store).
+      if (override.hidden === true) normalized.hidden = true;
+      if (normalized.label !== undefined || normalized.hidden !== undefined) {
+        overrides[key.trim()] = normalized;
+      }
+    }
+  }
+
+  return {
+    title:
+      typeof candidate.title === "string"
+        ? candidate.title
+        : DEFAULT_LEGEND_CONFIG.title,
+    groupByLayer: normalizeBoolean(
+      candidate.groupByLayer,
+      DEFAULT_LEGEND_CONFIG.groupByLayer,
+    ),
+    order,
+    overrides,
   };
 }
 
@@ -474,6 +527,7 @@ export function projectFromStore(state: {
   layers: GeoLibreLayer[];
   preferences: ProjectPreferences;
   plugins?: ProjectPluginState | null;
+  legend?: LegendConfig | null;
   storymap?: StoryMap | null;
   metadata: Record<string, unknown>;
 }): GeoLibreProject {
@@ -482,6 +536,7 @@ export function projectFromStore(state: {
     styles[layer.id] = layer.style;
   }
   const plugins = normalizeProjectPlugins(state.plugins);
+  const legend = normalizeLegendConfig(state.legend);
   const storymap = normalizeStoryMap(state.storymap);
   return {
     version: PROJECT_VERSION,
@@ -494,6 +549,7 @@ export function projectFromStore(state: {
     styles,
     preferences: state.preferences,
     ...(plugins ? { plugins } : {}),
+    ...(legend ? { legend } : {}),
     ...(storymap ? { storymap } : {}),
     metadata: state.metadata,
   };
@@ -564,6 +620,7 @@ export function applyProjectToStore(project: GeoLibreProject): {
   layers: GeoLibreLayer[];
   preferences: ProjectPreferences;
   projectPlugins: ProjectPluginState | null;
+  legend: LegendConfig;
   storymap: StoryMap | null;
   metadata: Record<string, unknown>;
 } {
@@ -582,6 +639,7 @@ export function applyProjectToStore(project: GeoLibreProject): {
     layers,
     preferences: normalizeProjectPreferences(project.preferences),
     projectPlugins: normalizeProjectPlugins(project.plugins),
+    legend: normalizeLegendConfig(project.legend) ?? { ...DEFAULT_LEGEND_CONFIG },
     storymap: normalizeStoryMap(project.storymap),
     metadata: project.metadata,
   };

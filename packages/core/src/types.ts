@@ -263,6 +263,51 @@ export const DEFAULT_PROJECT_PREFERENCES: ProjectPreferences = {
   environmentVariables: [],
 };
 
+/**
+ * A single user override for one legend item, keyed in {@link LegendConfig.overrides}
+ * by a stable item key (a layer id for a whole entry, or `${layerId}::${index}`
+ * for an individual class within a graduated/categorized entry).
+ */
+export interface LegendItemOverride {
+  /** User-supplied label that replaces the auto-generated one. */
+  label?: string;
+  /** When true, the item is omitted from the rendered legend. */
+  hidden?: boolean;
+}
+
+/**
+ * User customizations for the Print Layout legend. The legend itself is always
+ * derived from the visible layers' symbology; this record only stores the edits
+ * layered on top (title, ordering, per-item rename/hide), so it survives layer
+ * additions and removals and is persisted in the `.geolibre.json` project.
+ */
+export interface LegendConfig {
+  /** Heading drawn above the legend entries. */
+  title: string;
+  /** When true, classes are grouped under a per-layer heading. */
+  groupByLayer: boolean;
+  /**
+   * Custom top-level entry order by layer id, top-first. Layer ids not listed
+   * keep their default order after the listed ones.
+   */
+  order: string[];
+  /** Per-item overrides keyed by stable item key. */
+  overrides: Record<string, LegendItemOverride>;
+}
+
+// Frozen so the shared singleton can be safely spread (`{ ...DEFAULT_LEGEND_CONFIG }`)
+// at call sites without risk of a future in-place mutation corrupting the nested
+// `order`/`overrides` references that the spread keeps sharing.
+export const DEFAULT_LEGEND_CONFIG: LegendConfig = Object.freeze({
+  title: "Legend",
+  groupByLayer: true,
+  order: Object.freeze([] as string[]) as string[],
+  overrides: Object.freeze({} as Record<string, LegendItemOverride>) as Record<
+    string,
+    LegendItemOverride
+  >,
+});
+
 /** Camera target captured for a story chapter. */
 export interface StoryChapterLocation {
   center: [number, number];
@@ -350,6 +395,8 @@ export interface GeoLibreProject {
   styles: Record<string, LayerStyle>;
   preferences: ProjectPreferences;
   plugins?: ProjectPluginState;
+  /** User customizations for the Print Layout legend. */
+  legend?: LegendConfig;
   storymap?: StoryMap;
   metadata: Record<string, unknown>;
 }
