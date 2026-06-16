@@ -154,6 +154,7 @@ export interface AppState {
     geocodeOpen: boolean;
     sqlWorkspaceOpen: boolean;
     pythonConsoleOpen: boolean;
+    notebookOpen: boolean;
     assistantOpen: boolean;
     attributeTableOpen: boolean;
     storymapPanelOpen: boolean;
@@ -193,6 +194,7 @@ export interface AppState {
   setGeocodeOpen: (open: boolean) => void;
   setSqlWorkspaceOpen: (open: boolean) => void;
   setPythonConsoleOpen: (open: boolean) => void;
+  setNotebookOpen: (open: boolean) => void;
   setAssistantOpen: (open: boolean) => void;
   setAttributeTableOpen: (open: boolean) => void;
   setStorymapPanelOpen: (open: boolean) => void;
@@ -406,6 +408,7 @@ export const useAppStore = create<AppState>()(
         geocodeOpen: false,
         sqlWorkspaceOpen: false,
         pythonConsoleOpen: false,
+        notebookOpen: false,
         assistantOpen: false,
         attributeTableOpen: false,
         storymapPanelOpen: false,
@@ -476,6 +479,8 @@ export const useAppStore = create<AppState>()(
         set((s) => ({ ui: { ...s.ui, sqlWorkspaceOpen: open } })),
       setPythonConsoleOpen: (open) =>
         set((s) => ({ ui: { ...s.ui, pythonConsoleOpen: open } })),
+      setNotebookOpen: (open) =>
+        set((s) => ({ ui: { ...s.ui, notebookOpen: open } })),
       setAssistantOpen: (open) =>
         set((s) => ({ ui: { ...s.ui, assistantOpen: open } })),
       setAttributeTableOpen: (open) =>

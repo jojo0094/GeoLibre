@@ -32,6 +32,13 @@ const MARTIN_START_ATTEMPTS: usize = 3;
 const MARTIN_HEALTH_ATTEMPTS: usize = 30;
 const SIDECAR_HEALTH_ATTEMPTS: usize = 180;
 const SIDECAR_PORT: u16 = 8765;
+// The desktop JupyterLab server for the Notebook panel. Loopback-bound and
+// token-gated; uses its own uv project environment so it never disturbs the
+// FastAPI sidecar's env. First start can be slow while uv syncs JupyterLab.
+const JUPYTER_PORT: u16 = 8766;
+// Polled once per second, so up to ~4 minutes — generous headroom for the
+// first-run `uv sync` of JupyterLab on a cold cache.
+const JUPYTER_HEALTH_ATTEMPTS: usize = 240;
 const UV_INSTALL_BASE_URL: &str = "https://astral.sh/uv";
 const REMOTE_TILE_TIMEOUT_SECS: u64 = 8;
 const REMOTE_TILE_CONNECT_TIMEOUT_SECS: u64 = 4;
@@ -55,11 +62,25 @@ struct SidecarServerState {
     process: Mutex<Option<SidecarProcess>>,
 }
 
+struct JupyterServerState {
+    process: Mutex<Option<JupyterProcess>>,
+    // Token of the currently running server, so a reuse path can hand the same
+    // URL back without restarting.
+    token: Mutex<Option<String>>,
+    // Held for the whole of start_jupyter_server_blocking so two concurrent
+    // start calls can't both spawn on the same port (the loser would exit 1).
+    startup: Mutex<()>,
+}
+
 struct MartinProcess {
     child: Child,
 }
 
 struct SidecarProcess {
+    child: Child,
+}
+
+struct JupyterProcess {
     child: Child,
 }
 
@@ -119,6 +140,20 @@ impl Drop for SidecarProcess {
     }
 }
 
+impl JupyterProcess {
+    fn terminate(&mut self) {
+        // Same process-group teardown as the sidecar (the child is spawned with
+        // its own group, so this reaps `uv`/`jupyter`/kernel descendants).
+        terminate_sidecar_child(&mut self.child);
+    }
+}
+
+impl Drop for JupyterProcess {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configure_linux_webkit();
@@ -134,6 +169,11 @@ pub fn run() {
         .manage(SidecarServerState {
             process: Mutex::new(None),
         })
+        .manage(JupyterServerState {
+            process: Mutex::new(None),
+            token: Mutex::new(None),
+            startup: Mutex::new(()),
+        })
         .invoke_handler(tauri::generate_handler![
             close_oauth_popups,
             ensure_martin_binary,
@@ -147,6 +187,8 @@ pub fn run() {
             stop_martin_server,
             start_geolibre_sidecar,
             stop_geolibre_sidecar,
+            start_jupyter_server,
+            stop_jupyter_server,
             start_earth_engine_oauth,
             poll_earth_engine_oauth
         ])
@@ -638,6 +680,14 @@ struct SidecarServerInfo {
     port: u16,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JupyterServerInfo {
+    url: String,
+    port: u16,
+    token: String,
+}
+
 #[tauri::command]
 fn ensure_martin_binary(app: tauri::AppHandle) -> Result<MartinBinaryInfo, String> {
     ensure_martin_binary_path(&app)
@@ -867,6 +917,279 @@ fn stop_geolibre_sidecar_blocking(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn start_jupyter_server(app: tauri::AppHandle) -> Result<JupyterServerInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || start_jupyter_server_blocking(app))
+        .await
+        .map_err(|error| format!("Could not join Jupyter startup task: {error}"))?
+}
+
+fn start_jupyter_server_blocking(app: tauri::AppHandle) -> Result<JupyterServerInfo, String> {
+    let state = app.state::<JupyterServerState>();
+    // Serialize the whole startup. Concurrent calls (e.g. React StrictMode
+    // double-invoking the Notebook panel's mount effect in dev) would otherwise
+    // both pass the reuse check below and both spawn on JUPYTER_PORT; with
+    // `--port-retries=0` the loser fails to bind and exits 1. The second caller
+    // blocks here, then finds the live process in the reuse check and returns it.
+    let _startup = state
+        .startup
+        .lock()
+        .map_err(|_| "Could not lock Jupyter startup.".to_string())?;
+    // Reuse an already-running server: hand back the same URL + token.
+    {
+        let mut process = state
+            .process
+            .lock()
+            .map_err(|_| "Could not lock Jupyter process state.".to_string())?;
+        if let Some(server) = process.as_mut() {
+            if server
+                .child
+                .try_wait()
+                .map_err(|error| format!("Could not inspect Jupyter process: {error}"))?
+                .is_none()
+            {
+                let token = state
+                    .token
+                    .lock()
+                    .map_err(|_| "Could not lock Jupyter token.".to_string())?
+                    .clone()
+                    .unwrap_or_default();
+                return Ok(JupyterServerInfo {
+                    url: jupyter_base_url(),
+                    port: JUPYTER_PORT,
+                    token,
+                });
+            }
+            *process = None;
+        }
+    }
+
+    // A Jupyter server from a previous app session may still hold the port. We
+    // can't reuse it (its per-launch token is unknown to us), and because we
+    // spawn with `--ServerApp.port_retries=0`, a new server would fail to bind
+    // and exit 1 ("exited before it was ready") while the orphan lingers. Clear
+    // any stale listener and wait for the port to free before spawning.
+    let _ = terminate_jupyter_listeners_on_port(JUPYTER_PORT);
+    wait_for_port_free(JUPYTER_PORT);
+
+    let uv = ensure_managed_uv(&app)?;
+    let project_dir = sidecar_project_dir(&app)?;
+    let config_path = project_dir.join("jupyter_server_config.py");
+    let runtime_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?
+        .join("runtime");
+    // Notebooks are saved here (the JupyterLab file browser root).
+    let notebooks_dir = runtime_dir.join("notebooks");
+    let _ = fs::create_dir_all(&notebooks_dir);
+    // Seed the starter Welcome notebook (the same one bundled into JupyterLite on
+    // web) on first run only, so we never clobber a user's edits.
+    let welcome_dest = notebooks_dir.join("Welcome.ipynb");
+    if !welcome_dest.exists() {
+        let _ = fs::copy(
+            project_dir
+                .join("notebook_examples")
+                .join("Welcome.ipynb"),
+            &welcome_dest,
+        );
+    }
+    // Make the kernel-side `geolibre` client importable from any notebook: copy
+    // it out of the bundled backend resource into a dedicated lib dir placed on
+    // the kernel's PYTHONPATH (so `import geolibre` works regardless of where the
+    // notebook lives).
+    let lib_dir = runtime_dir.join("notebook-lib");
+    let _ = fs::create_dir_all(&lib_dir);
+    let _ = fs::copy(
+        project_dir.join("notebook_client.py"),
+        lib_dir.join("geolibre.py"),
+    );
+    let token = generate_jupyter_token();
+
+    let mut command = Command::new(&uv);
+    command
+        .arg("run")
+        .arg("--project")
+        .arg(&project_dir)
+        // The `notebook` extra carries JupyterLab. Synced into a dedicated
+        // project environment so it never disturbs the FastAPI sidecar's env
+        // (which syncs the `ml` extra).
+        .arg("--extra")
+        .arg("notebook")
+        .arg("jupyter")
+        .arg("lab")
+        .arg("--no-browser")
+        .arg(format!("--config={}", config_path.display()))
+        .arg("--ServerApp.ip=127.0.0.1")
+        .arg(format!("--ServerApp.port={JUPYTER_PORT}"))
+        // Fail fast instead of hopping to another port we'd never discover.
+        .arg("--ServerApp.port_retries=0")
+        .arg(format!("--ServerApp.root_dir={}", notebooks_dir.display()))
+        .arg(format!("--IdentityProvider.token={token}"))
+        .current_dir(&project_dir)
+        .env("GEOLIBRE_UV", &uv)
+        .env("GEOLIBRE_RUNTIME_DIR", &runtime_dir)
+        .env("UV_CACHE_DIR", runtime_dir.join("uv-cache"))
+        .env("UV_PYTHON_INSTALL_DIR", runtime_dir.join("uv-python"))
+        .env("UV_PROJECT_ENVIRONMENT", runtime_dir.join("jupyter-server"))
+        // Prepend the bundled `geolibre` client to the kernel import path,
+        // preserving any inherited PYTHONPATH rather than replacing it.
+        .env("PYTHONPATH", prepend_pythonpath(&lib_dir))
+        .stdin(Stdio::null())
+        // Inherit (don't capture) stdout/stderr. Unlike the sidecar's quiet
+        // uvicorn, `uv sync` of JupyterLab + JupyterLab's own startup write a lot;
+        // a captured 64 KB pipe we don't drain during the health wait would fill
+        // and block the child, so it would never become ready. Inheriting also
+        // surfaces the logs in the dev terminal for debugging.
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    configure_sidecar_process(&mut command);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start Jupyter server: {error}"))?;
+
+    let base_url = jupyter_base_url();
+    if let Err(error) = wait_for_jupyter_health(&base_url, &token, &mut child) {
+        terminate_sidecar_child(&mut child);
+        return Err(error);
+    }
+
+    // We hold the startup lock, so no concurrent start could have stored a
+    // process; record ours as the live server.
+    *state
+        .process
+        .lock()
+        .map_err(|_| "Could not lock Jupyter process state.".to_string())? =
+        Some(JupyterProcess { child });
+    *state
+        .token
+        .lock()
+        .map_err(|_| "Could not lock Jupyter token.".to_string())? = Some(token.clone());
+
+    Ok(JupyterServerInfo {
+        url: base_url,
+        port: JUPYTER_PORT,
+        token,
+    })
+}
+
+#[tauri::command]
+async fn stop_jupyter_server(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || stop_jupyter_server_blocking(app))
+        .await
+        .map_err(|error| format!("Could not join Jupyter stop task: {error}"))?
+}
+
+fn stop_jupyter_server_blocking(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<JupyterServerState>();
+    {
+        let mut process = state
+            .process
+            .lock()
+            .map_err(|_| "Could not lock Jupyter process state.".to_string())?;
+        // JupyterProcess::Drop terminates the child's process group; taking the
+        // value out is enough (see stop_geolibre_sidecar_blocking).
+        let taken = process.take();
+        drop(process);
+        drop(taken);
+    }
+    if let Ok(mut token) = state.token.lock() {
+        *token = None;
+    }
+    // Backstop: reap anything still bound to the port (no-op on non-unix and
+    // when nothing is listening).
+    terminate_jupyter_listeners_on_port(JUPYTER_PORT)?;
+    Ok(())
+}
+
+fn jupyter_base_url() -> String {
+    format!("http://127.0.0.1:{JUPYTER_PORT}")
+}
+
+// Wait (briefly) until `port` can be bound, i.e. a just-terminated listener has
+// fully released it. Binding then dropping leaves a small race window, but it is
+// enough to avoid a `--port-retries=0` bind failure right after killing an orphan.
+fn wait_for_port_free(port: u16) {
+    for _ in 0..20 {
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+// Prepend `dir` to any inherited PYTHONPATH (platform separator), so a user's
+// existing value is preserved rather than clobbered.
+fn prepend_pythonpath(dir: &Path) -> String {
+    let dir = dir.display().to_string();
+    match env::var("PYTHONPATH") {
+        Ok(existing) if !existing.is_empty() => {
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            format!("{dir}{sep}{existing}")
+        }
+        _ => dir,
+    }
+}
+
+fn jupyter_health_is_ready(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    token: &str,
+) -> bool {
+    client
+        .get(format!("{base_url}/api/status"))
+        .header("Authorization", format!("token {token}"))
+        .send()
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
+}
+
+fn wait_for_jupyter_health(base_url: &str, token: &str, child: &mut Child) -> Result<(), String> {
+    // Build the HTTP client once and reuse it across all health polls (this loop
+    // runs up to JUPYTER_HEALTH_ATTEMPTS = 240 times).
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+        .map_err(|error| format!("Could not build HTTP client: {error}"))?;
+    for _ in 0..JUPYTER_HEALTH_ATTEMPTS {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("Could not inspect Jupyter process: {error}"))?
+        {
+            // Output is inherited (visible in the terminal), not captured, so we
+            // surface only the exit status here.
+            return Err(format!(
+                "Jupyter server exited before it was ready (exit status: {status}). \
+                 Check the terminal for the Jupyter/uv startup output."
+            ));
+        }
+
+        if jupyter_health_is_ready(&client, base_url, token) {
+            return Ok(());
+        }
+
+        thread::sleep(Duration::from_secs(1));
+    }
+
+    Err("Jupyter server did not become ready in time.".to_string())
+}
+
+// A loopback-bound, per-launch token for the desktop Jupyter server. It is the
+// only barrier once the XSRF check is disabled for the embedded iframe (see
+// jupyter_server_config.py), so use the OS CSPRNG (128 random bits) rather than
+// anything derived from the clock/pid.
+fn generate_jupyter_token() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).expect("OS CSPRNG (getrandom) unavailable");
+    let mut token = String::with_capacity(32);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(token, "{byte:02x}");
+    }
+    token
+}
+
 fn sidecar_base_url() -> String {
     format!("http://127.0.0.1:{SIDECAR_PORT}")
 }
@@ -969,6 +1292,33 @@ fn terminate_sidecar_process_group(_child: &mut Child) {}
 
 #[cfg(target_os = "linux")]
 fn terminate_sidecar_listeners_on_port(port: u16) -> Result<(), String> {
+    terminate_listeners_on_port(port, is_geolibre_sidecar_process)
+}
+
+// Reap a stale Jupyter server that still holds the port (e.g. orphaned by a
+// non-graceful exit of a previous app session). Recognized by its cmdline so we
+// never touch an unrelated jupyter (the user's own JupyterHub, etc.).
+#[cfg(target_os = "linux")]
+fn terminate_jupyter_listeners_on_port(port: u16) -> Result<(), String> {
+    terminate_listeners_on_port(port, is_geolibre_jupyter_process)
+}
+
+// Known gap: this is a no-op on macOS/Windows (the /proc-based listener lookup is
+// Linux-only). The current session's child is still reaped on exit via
+// JupyterProcess::Drop, but an orphan left by a *previous* crashed session can
+// keep holding the port there, in which case the next launch fails to bind and
+// surfaces "exited before it was ready". A cross-platform port-owner lookup
+// (e.g. lsof on macOS) would be needed to close this.
+#[cfg(not(target_os = "linux"))]
+fn terminate_jupyter_listeners_on_port(_port: u16) -> Result<(), String> {
+    Ok(())
+}
+
+// Kill the processes listening on `port` that `is_ours` recognizes (SIGTERM then
+// SIGKILL). The `is_ours` guard prevents killing an unrelated process that
+// happens to hold the port.
+#[cfg(target_os = "linux")]
+fn terminate_listeners_on_port(port: u16, is_ours: fn(i32) -> bool) -> Result<(), String> {
     let inodes = listening_tcp_inodes(port)?;
     if inodes.is_empty() {
         return Ok(());
@@ -984,7 +1334,7 @@ fn terminate_sidecar_listeners_on_port(port: u16) -> Result<(), String> {
         else {
             continue;
         };
-        if process_has_socket(pid, &inodes)? && is_geolibre_sidecar_process(pid) {
+        if process_has_socket(pid, &inodes)? && is_ours(pid) {
             pids.insert(pid);
         }
     }
@@ -1071,6 +1421,20 @@ fn is_geolibre_sidecar_process(pid: i32) -> bool {
     let command_line = String::from_utf8_lossy(&command_line);
     command_line.contains("geolibre_server.app.main")
         || command_line.contains("geolibre_server/app")
+}
+
+// Recognize OUR Jupyter server (started by start_jupyter_server) by the bundled
+// config path on its command line — specific enough not to match the user's own
+// jupyter/JupyterHub processes.
+#[cfg(target_os = "linux")]
+fn is_geolibre_jupyter_process(pid: i32) -> bool {
+    let path = format!("/proc/{pid}/cmdline");
+    let Ok(command_line) = fs::read(path) else {
+        return false;
+    };
+    let command_line = String::from_utf8_lossy(&command_line);
+    command_line.contains("jupyter_server_config.py")
+        && command_line.contains("geolibre_server")
 }
 
 #[cfg(unix)]
