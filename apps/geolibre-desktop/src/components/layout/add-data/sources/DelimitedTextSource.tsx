@@ -1,6 +1,7 @@
 import { Button, Input, Label, Select } from "@geolibre/ui";
 import { Columns3, FileUp } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   parseDelimitedTextFields,
   parseDelimitedTextLayer,
@@ -23,7 +24,11 @@ import { AddDataSourceForm, useAddDataSource } from "../shared";
 import type { DelimitedTextDelimiter, DelimitedTextMode } from "../types";
 
 export function DelimitedTextSource() {
-  const source = useAddDataSource("Delimited Text Layer");
+  const { t } = useTranslation();
+  // Captured once on mount so the "did the user rename it?" comparisons below
+  // stay stable even if the UI language changes while the dialog is open.
+  const [defaultName] = useState(() => t("addData.delimitedText.defaultName"));
+  const source = useAddDataSource(defaultName);
   const [delimitedTextMode, setDelimitedTextMode] =
     useState<DelimitedTextMode>("url");
   const [delimitedTextUrl, setDelimitedTextUrl] = useState(
@@ -71,7 +76,7 @@ export function DelimitedTextSource() {
   }> => {
     if (delimitedTextMode === "file") {
       if (!selectedDelimitedText) {
-        throw new Error("Choose a delimited text file.");
+        throw new Error(t("addData.delimitedText.errorChooseFile"));
       }
       return {
         sourcePath: selectedDelimitedText.path,
@@ -80,11 +85,13 @@ export function DelimitedTextSource() {
     }
 
     const sourcePath = delimitedTextUrl.trim();
-    if (!sourcePath) throw new Error("Enter a delimited text URL.");
+    if (!sourcePath) throw new Error(t("addData.delimitedText.errorUrl"));
 
     const response = await fetch(sourcePath);
     if (!response.ok) {
-      throw new Error(`Request failed with status ${response.status}`);
+      throw new Error(
+        t("addData.common.requestFailed", { status: response.status }),
+      );
     }
     return {
       sourcePath,
@@ -106,19 +113,25 @@ export function DelimitedTextSource() {
         readText: true,
       });
       if (!result) return;
-      if (!result.text) throw new Error("Delimited text file data is missing.");
+      if (!result.text)
+        throw new Error(t("addData.delimitedText.errorFileMissing"));
       setSelectedDelimitedText({
         path: result.path,
         text: result.text,
       });
       resetDelimitedTextColumns();
       source.setLayerName((current) =>
-        current.trim() && current !== "Delimited Text Layer"
+        current.trim() && current !== defaultName
           ? current
-          : layerNameFromPath(result.path, "Delimited Text Layer"),
+          : layerNameFromPath(
+              result.path,
+              defaultName,
+            ),
       );
     } catch (err) {
-      source.setError(errorMessage(err, "Could not read delimited text file."));
+      source.setError(
+        errorMessage(err, t("addData.delimitedText.readError")),
+      );
     }
   };
 
@@ -156,10 +169,12 @@ export function DelimitedTextSource() {
         ]),
       );
       setDelimitedTextColumnsStatus(
-        `Retrieved ${fields.length} column${fields.length === 1 ? "" : "s"}.`,
+        t("addData.delimitedText.retrievedColumns", { count: fields.length }),
       );
     } catch (err) {
-      source.setError(errorMessage(err, "Could not retrieve column names."));
+      source.setError(
+        errorMessage(err, t("addData.delimitedText.errorRetrieveColumns")),
+      );
       setDelimitedTextFields([]);
     } finally {
       setIsRetrievingDelimitedTextColumns(false);
@@ -167,13 +182,14 @@ export function DelimitedTextSource() {
   };
 
   const handleSubmit = source.runSubmit(async () => {
-    const name = source.layerName.trim() || "Delimited Text Layer";
+    const name =
+      source.layerName.trim() || defaultName;
     const delimiter = resolveDelimitedTextDelimiter(
       delimitedTextDelimiter,
       delimitedTextCustomDelimiter,
     );
     const { sourcePath, text } = await readDelimitedTextSource();
-    if (!text) throw new Error("Delimited text data is missing.");
+    if (!text) throw new Error(t("addData.delimitedText.errorDataMissing"));
 
     const result = parseDelimitedTextLayer(text, {
       delimiter,
@@ -244,7 +260,9 @@ export function DelimitedTextSource() {
     >
       <div className="space-y-3">
         <div className="space-y-1.5">
-          <Label htmlFor="delimited-text-mode">Source type</Label>
+          <Label htmlFor="delimited-text-mode">
+            {t("addData.common.sourceType")}
+          </Label>
           <Select
             id="delimited-text-mode"
             value={delimitedTextMode}
@@ -254,8 +272,8 @@ export function DelimitedTextSource() {
               )
             }
           >
-            <option value="url">Delimited text URL</option>
-            <option value="file">Delimited text file</option>
+            <option value="url">{t("addData.delimitedText.url")}</option>
+            <option value="file">{t("addData.delimitedText.file")}</option>
           </Select>
         </div>
 
@@ -267,20 +285,22 @@ export function DelimitedTextSource() {
               onClick={handleChooseDelimitedText}
             >
               <FileUp className="mr-2 h-3.5 w-3.5" />
-              Choose file
+              {t("addData.common.chooseFile")}
             </Button>
             <span className="min-w-0 truncate text-xs text-muted-foreground">
               {selectedDelimitedText
                 ? fileNameFromPath(selectedDelimitedText.path)
-                : "No file selected"}
+                : t("addData.common.noFileSelected")}
             </span>
           </div>
         ) : (
           <div className="space-y-1.5">
-            <Label htmlFor="delimited-text-url">Delimited text URL</Label>
+            <Label htmlFor="delimited-text-url">
+              {t("addData.delimitedText.url")}
+            </Label>
             <Input
               id="delimited-text-url"
-              placeholder="https://example.com/data.csv"
+              placeholder={t("addData.delimitedText.urlPlaceholder")}
               value={delimitedTextUrl}
               onChange={(event) => {
                 setDelimitedTextUrl(event.target.value);
@@ -304,8 +324,8 @@ export function DelimitedTextSource() {
         >
           <Columns3 className="mr-2 h-3.5 w-3.5" />
           {isRetrievingDelimitedTextColumns
-            ? "Retrieving..."
-            : "Retrieve columns"}
+            ? t("addData.delimitedText.retrieving")
+            : t("addData.delimitedText.retrieveColumns")}
         </Button>
         {delimitedTextColumnsStatus ? (
           <p className="text-xs text-muted-foreground">
@@ -315,7 +335,9 @@ export function DelimitedTextSource() {
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <Label htmlFor="delimited-text-delimiter">Delimiter</Label>
+            <Label htmlFor="delimited-text-delimiter">
+              {t("addData.delimitedText.delimiter")}
+            </Label>
             <Select
               id="delimited-text-delimiter"
               value={delimitedTextDelimiter}
@@ -326,17 +348,27 @@ export function DelimitedTextSource() {
                 resetDelimitedTextColumns();
               }}
             >
-              <option value="comma">Comma</option>
-              <option value="tab">Tab</option>
-              <option value="semicolon">Semicolon</option>
-              <option value="pipe">Pipe</option>
-              <option value="custom">Custom</option>
+              <option value="comma">
+                {t("addData.delimitedText.delimiterComma")}
+              </option>
+              <option value="tab">
+                {t("addData.delimitedText.delimiterTab")}
+              </option>
+              <option value="semicolon">
+                {t("addData.delimitedText.delimiterSemicolon")}
+              </option>
+              <option value="pipe">
+                {t("addData.delimitedText.delimiterPipe")}
+              </option>
+              <option value="custom">
+                {t("addData.delimitedText.delimiterCustom")}
+              </option>
             </Select>
           </div>
           {delimitedTextDelimiter === "custom" ? (
             <div className="space-y-1.5">
               <Label htmlFor="delimited-text-custom-delimiter">
-                Custom delimiter
+                {t("addData.delimitedText.customDelimiter")}
               </Label>
               <Input
                 id="delimited-text-custom-delimiter"
@@ -352,7 +384,9 @@ export function DelimitedTextSource() {
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <Label htmlFor="delimited-text-longitude">Longitude field</Label>
+            <Label htmlFor="delimited-text-longitude">
+              {t("addData.delimitedText.longitudeField")}
+            </Label>
             <Select
               id="delimited-text-longitude"
               value={delimitedTextLongitudeField}
@@ -368,7 +402,9 @@ export function DelimitedTextSource() {
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="delimited-text-latitude">Latitude field</Label>
+            <Label htmlFor="delimited-text-latitude">
+              {t("addData.delimitedText.latitudeField")}
+            </Label>
             <Select
               id="delimited-text-latitude"
               value={delimitedTextLatitudeField}

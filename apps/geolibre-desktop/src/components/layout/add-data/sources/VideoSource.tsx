@@ -1,5 +1,6 @@
 import { Input, Label } from "@geolibre/ui";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   DEFAULT_VIDEO_BOTTOM_LEFT,
   DEFAULT_VIDEO_BOTTOM_RIGHT,
@@ -8,11 +9,12 @@ import {
   DEFAULT_VIDEO_TOP_RIGHT,
   DEFAULT_VIDEO_WEBM_URL,
 } from "../constants";
-import { createBaseLayer, parseVideoCorner } from "../helpers";
+import { createBaseLayer } from "../helpers";
 import { AddDataSourceForm, useAddDataSource } from "../shared";
 
 export function VideoSource() {
-  const source = useAddDataSource("Video Layer");
+  const { t } = useTranslation();
+  const source = useAddDataSource(t("addData.video.defaultName"));
   const [videoMp4Url, setVideoMp4Url] = useState(DEFAULT_VIDEO_MP4_URL);
   const [videoWebmUrl, setVideoWebmUrl] = useState(DEFAULT_VIDEO_WEBM_URL);
   const [videoTopLeft, setVideoTopLeft] = useState(DEFAULT_VIDEO_TOP_LEFT);
@@ -24,11 +26,33 @@ export function VideoSource() {
     DEFAULT_VIDEO_BOTTOM_LEFT,
   );
 
+  // Local, translated equivalent of helpers' parseVideoCorner: parses a
+  // "longitude, latitude" corner into a [lng, lat] pair and throws localized
+  // validation errors (the shared helper stays English for its unit tests).
+  const parseCorner = (value: string, corner: string): [number, number] => {
+    const parts = value.split(",").map((part) => part.trim());
+    if (parts.length !== 2) {
+      throw new Error(t("addData.video.errorCornerFormat", { corner }));
+    }
+    const lng = Number(parts[0]);
+    const lat = Number(parts[1]);
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+      throw new Error(t("addData.video.errorCornerNumber", { corner }));
+    }
+    if (lng < -180 || lng > 180) {
+      throw new Error(t("addData.video.errorCornerLng", { corner }));
+    }
+    if (lat < -90 || lat > 90) {
+      throw new Error(t("addData.video.errorCornerLat", { corner }));
+    }
+    return [lng, lat];
+  };
+
   const handleSubmit = source.runSubmit(() => {
-    const name = source.layerName.trim() || "Video Layer";
+    const name = source.layerName.trim() || t("addData.video.defaultName");
     const primary = videoMp4Url.trim();
     if (!primary) {
-      throw new Error("Enter a video URL.");
+      throw new Error(t("addData.video.errorUrl"));
     }
     const urls = [primary];
     const webm = videoWebmUrl.trim();
@@ -36,7 +60,7 @@ export function VideoSource() {
     // The media-src CSP is HTTPS-only, so an http:// URL would be silently
     // blocked — reject it up front with a clear message.
     if (urls.some((url) => !/^https:\/\//i.test(url))) {
-      throw new Error("Video URLs must start with https://.");
+      throw new Error(t("addData.video.errorHttps"));
     }
     const coordinates: [
       [number, number],
@@ -44,10 +68,10 @@ export function VideoSource() {
       [number, number],
       [number, number],
     ] = [
-      parseVideoCorner(videoTopLeft, "top-left"),
-      parseVideoCorner(videoTopRight, "top-right"),
-      parseVideoCorner(videoBottomRight, "bottom-right"),
-      parseVideoCorner(videoBottomLeft, "bottom-left"),
+      parseCorner(videoTopLeft, t("addData.video.cornerTopLeft")),
+      parseCorner(videoTopRight, t("addData.video.cornerTopRight")),
+      parseCorner(videoBottomRight, t("addData.video.cornerBottomRight")),
+      parseCorner(videoBottomLeft, t("addData.video.cornerBottomLeft")),
     ];
     const lngs = coordinates.map((corner) => corner[0]);
     const lats = coordinates.map((corner) => corner[1]);
@@ -85,26 +109,28 @@ export function VideoSource() {
     >
       <div className="space-y-3">
         <div className="space-y-1.5">
-          <Label htmlFor="video-mp4-url">Primary video URL</Label>
+          <Label htmlFor="video-mp4-url">{t("addData.video.primaryUrl")}</Label>
           <Input
             id="video-mp4-url"
-            placeholder="https://example.com/clip.mp4"
+            placeholder={t("addData.video.primaryUrlPlaceholder")}
             value={videoMp4Url}
             onChange={(event) => setVideoMp4Url(event.target.value)}
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="video-webm-url">Fallback video URL (optional)</Label>
+          <Label htmlFor="video-webm-url">
+            {t("addData.video.fallbackUrl")}
+          </Label>
           <Input
             id="video-webm-url"
-            placeholder="https://example.com/clip.webm"
+            placeholder={t("addData.video.fallbackUrlPlaceholder")}
             value={videoWebmUrl}
             onChange={(event) => setVideoWebmUrl(event.target.value)}
           />
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <Label htmlFor="video-top-left">Top-left (lng, lat)</Label>
+            <Label htmlFor="video-top-left">{t("addData.video.topLeft")}</Label>
             <Input
               id="video-top-left"
               value={videoTopLeft}
@@ -112,7 +138,9 @@ export function VideoSource() {
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="video-top-right">Top-right (lng, lat)</Label>
+            <Label htmlFor="video-top-right">
+              {t("addData.video.topRight")}
+            </Label>
             <Input
               id="video-top-right"
               value={videoTopRight}
@@ -120,7 +148,9 @@ export function VideoSource() {
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="video-bottom-right">Bottom-right (lng, lat)</Label>
+            <Label htmlFor="video-bottom-right">
+              {t("addData.video.bottomRight")}
+            </Label>
             <Input
               id="video-bottom-right"
               value={videoBottomRight}
@@ -128,7 +158,9 @@ export function VideoSource() {
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="video-bottom-left">Bottom-left (lng, lat)</Label>
+            <Label htmlFor="video-bottom-left">
+              {t("addData.video.bottomLeft")}
+            </Label>
             <Input
               id="video-bottom-left"
               value={videoBottomLeft}
@@ -137,9 +169,7 @@ export function VideoSource() {
           </div>
         </div>
         <p className="text-xs text-muted-foreground">
-          The four corners georeference the video on the map. The video must be
-          served over HTTPS and the host must allow cross-origin requests (CORS)
-          for the frames to render.
+          {t("addData.video.cornersNote")}
         </p>
       </div>
     </AddDataSourceForm>
