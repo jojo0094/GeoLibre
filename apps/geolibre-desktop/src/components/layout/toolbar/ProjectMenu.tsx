@@ -13,6 +13,7 @@ import {
 } from "@geolibre/ui";
 import {
   BookOpen,
+  FileCode2,
   FilePen,
   FilePlus2,
   FileText,
@@ -45,6 +46,7 @@ interface ProjectMenuProps {
   onSave: () => void;
   onSaveAs: () => void;
   onShare: () => void;
+  onExportHtml: () => void;
   onCollaborate: () => void;
   onPrintLayout: () => void;
   onDownloadOffline: () => void;
@@ -63,6 +65,7 @@ export function ProjectMenu({
   onSave,
   onSaveAs,
   onShare,
+  onExportHtml,
   onCollaborate,
   onPrintLayout,
   onDownloadOffline,
@@ -82,6 +85,7 @@ export function ProjectMenu({
     show("project.save") ||
     show("project.saveAs") ||
     show("project.share") ||
+    show("project.exportHtml") ||
     (collaborationEnabled && show("project.collaborate"));
   const showPrintGroup =
     show("project.printLayout") ||
@@ -220,6 +224,12 @@ export function ProjectMenu({
           <DropdownMenuItem onSelect={onShare}>
             <Share2 className="mr-2 h-3.5 w-3.5" />
             {t("toolbar.item.shareEllipsis")}
+          </DropdownMenuItem>
+        )}
+        {show("project.exportHtml") && (
+          <DropdownMenuItem onSelect={onExportHtml}>
+            <FileCode2 className="mr-2 h-3.5 w-3.5" />
+            {t("toolbar.item.exportHtmlEllipsis")}
           </DropdownMenuItem>
         )}
         {collaborationEnabled && show("project.collaborate") && (

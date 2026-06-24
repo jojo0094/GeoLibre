@@ -21,7 +21,9 @@ import {
   RecentProjectGoneError,
   saveProjectFile,
   saveProjectFileToPath,
+  saveTextFileWithFallback,
 } from "../lib/tauri-io";
+import { buildProjectHtml } from "../lib/html-export";
 import { mergeStringLists } from "../lib/string-lists";
 import { fetchProjectFromUrl } from "../lib/project-url";
 import { resolveShareBaseUrl } from "../lib/share-geolibre";
@@ -626,6 +628,54 @@ export function useProjectFileActions(mapControllerRef: MapControllerRef) {
   const handleSave = () => saveProject();
   const handleSaveAs = () => saveProject({ saveAs: true });
 
+  // Export the current project as a standalone interactive HTML page (#821).
+  // Shares saveProject's guard so a double-click can't open two save dialogs.
+  const handleExportHtml = async (): Promise<boolean> => {
+    if (isSavingRef.current) return false;
+    isSavingRef.current = true;
+    try {
+      // Embed local vector data (self-contained, like Share), then strip env
+      // vars: secrets that serve no purpose in a static, shareable viewer.
+      const { project, defaultProjectName } = await buildEmbeddedProject();
+      const safeProject = {
+        ...project,
+        preferences: { ...project.preferences, environmentVariables: [] },
+      };
+      const html = buildProjectHtml({
+        project: safeProject,
+        title: defaultProjectName,
+      });
+      const slug =
+        defaultProjectName
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "") || "geolibre-map";
+      // Returns null when the user cancels the save dialog; report that as a
+      // no-op rather than a successful export.
+      const savedPath = await saveTextFileWithFallback(html, {
+        defaultName: `${slug}.html`,
+        filters: [{ name: t("toolbar.item.htmlFile"), extensions: ["html"] }],
+        browserTypes: [
+          {
+            description: t("toolbar.item.htmlFile"),
+            accept: { "text/html": [".html"] },
+          },
+        ],
+        mimeType: "text/html",
+      });
+      return savedPath !== null;
+    } catch (error) {
+      setActionError(
+        error instanceof Error
+          ? error.message
+          : t("toolbar.error.couldNotExportHtml"),
+      );
+      return false;
+    } finally {
+      isSavingRef.current = false;
+    }
+  };
+
   // Open-change handler for the Open-from-URL dialog; aborts an in-flight fetch
   // and resets the form when the dialog closes.
   const handleProjectUrlDialogOpenChange = (open: boolean) => {
@@ -667,5 +717,6 @@ export function useProjectFileActions(mapControllerRef: MapControllerRef) {
     buildEmbeddedProject,
     handleSave,
     handleSaveAs,
+    handleExportHtml,
   };
 }
