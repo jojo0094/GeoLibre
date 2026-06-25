@@ -871,7 +871,8 @@ export function TopToolbar({
         "flex min-h-11 min-w-0 shrink-0 items-center gap-1 border-b bg-card py-1",
         compact
           ? "flex-nowrap overflow-x-auto px-1.5"
-          : "flex-wrap px-2 md:flex-nowrap",
+          : // Wrap below md; scroll a single row at md+ so tablets reach every menu (#871).
+            "flex-wrap px-2 md:flex-nowrap md:overflow-x-auto",
       )}
     >
       <span className="mr-1 flex shrink-0 items-center gap-1.5 text-sm font-semibold text-primary md:mr-2">
