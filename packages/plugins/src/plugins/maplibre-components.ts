@@ -741,6 +741,28 @@ let stacSearchStoreUnsubscribe: (() => void) | null = null;
 let zarrStoreUnsubscribe: (() => void) | null = null;
 let lidarStoreUnsubscribe: (() => void) | null = null;
 let splattingStoreUnsubscribe: (() => void) | null = null;
+
+// Re-streaming saved LiDAR layers on project open. The store only holds a
+// `lidar-url` layer's metadata; the point cloud itself is loaded by the LiDAR
+// control, not the store, so a reopened project shows the layer in the panel
+// but renders nothing until we ask the control to stream it again (see
+// restoreLidarLayers). Because loadPointCloud assigns a fresh id, each entry
+// carries the saved layer's desired state so the load handler can reattach the
+// loaded cloud to the saved layer instead of adding a duplicate. The map is
+// keyed by source URL and holds a FIFO queue per URL, so two saved layers that
+// point at the same COPC file both restore (one entry consumed per load event).
+interface PendingLidarRestore {
+  layerId: string;
+  name: string;
+  visible: boolean;
+  opacity: number;
+  style: GeoLibreLayer["style"];
+  groupId: string | undefined;
+  beforeLayerId: string | null;
+}
+const pendingLidarRestores = new Map<string, PendingLidarRestore[]>();
+let lidarRestoreInFlight = false;
+
 let pluginActive = false;
 let componentsControlRevision = 0;
 let componentsConstructorsPromise: Promise<ComponentsConstructors> | null =
@@ -2433,13 +2455,20 @@ async function openStandaloneHtmlControl(
 }
 
 async function openStandaloneLidarControl(
-  app: GeoLibreAppAPI
+  app: GeoLibreAppAPI,
+  options: { reveal?: boolean } = {}
 ): Promise<boolean> {
+  // `reveal` shows and expands the panel (the default, for the Add LiDAR Layer
+  // menu action). Project restore mounts the control only to re-stream saved
+  // clouds, so it passes `reveal: false` to keep the panel out of the user's
+  // way; a freshly created control is hidden so it does not pop open on load.
+  const reveal = options.reveal ?? true;
   const {
     LidarControl: LidarControlClass,
     LidarLayerAdapter: LidarLayerAdapterClass,
   } = await getComponentsConstructors();
 
+  const created = !lidarControl;
   lidarControl ??= createLidarControl(
     LidarControlClass,
     LidarLayerAdapterClass
@@ -2457,10 +2486,103 @@ async function openStandaloneLidarControl(
   startLidarThemeSync();
 
   setTimeout(() => {
-    showLidarControl(lidarControl);
-    lidarControl?.expand();
+    if (reveal) {
+      showLidarControl(lidarControl);
+      lidarControl?.expand();
+    } else if (created) {
+      hideLidarControl(lidarControl);
+    }
   }, 0);
   return true;
+}
+
+/**
+ * Read the source URL of a `lidar-url` layer, preferring the dedicated
+ * `sourcePath` and falling back to `source.url`.
+ */
+function lidarLayerUrl(layer: GeoLibreLayer): string | null {
+  if (typeof layer.sourcePath === "string" && layer.sourcePath) {
+    return layer.sourcePath;
+  }
+  const url = (layer.source as { url?: unknown }).url;
+  return typeof url === "string" && url ? url : null;
+}
+
+/** Whether a restore is already queued or in flight for this specific layer. */
+function isLidarRestorePending(layer: GeoLibreLayer): boolean {
+  for (const queue of pendingLidarRestores.values()) {
+    if (queue.some((pending) => pending.layerId === layer.id)) return true;
+  }
+  return false;
+}
+
+/**
+ * Re-stream the point clouds for any restored `lidar-url` layers that are not
+ * yet loaded into the LiDAR control (e.g. after opening a saved project). The
+ * store only holds the layer metadata, so without this the layer appears in the
+ * Layers panel but renders nothing. The loaded cloud is reattached to the saved
+ * layer in {@link createLidarLoadHandler}, preserving its visibility, opacity,
+ * style, name, and position.
+ */
+export async function restoreLidarLayers(app: GeoLibreAppAPI): Promise<void> {
+  if (lidarRestoreInFlight) return;
+
+  const pending = useAppStore
+    .getState()
+    .layers.filter(
+      (layer) =>
+        isLidarControlLayer(layer) &&
+        !hasLidarPointCloud(layer.id) &&
+        !isLidarRestorePending(layer)
+    );
+  if (pending.length === 0) return;
+
+  lidarRestoreInFlight = true;
+  try {
+    const opened = await openStandaloneLidarControl(app, { reveal: false });
+    if (!opened || !lidarControl) return;
+    // The deck.gl point-cloud overlay only renders under the Mercator
+    // projection (the streaming loader's viewport math breaks under the default
+    // globe), matching the USGS LiDAR plugin and the other deck.gl controls.
+    ensureMercatorProjection(app.getMap?.());
+
+    for (const layer of pending) {
+      const url = lidarLayerUrl(layer);
+      if (!url) continue;
+      // Re-check against the live store: a layer may have been removed, already
+      // loaded, or queued while the control was loading asynchronously.
+      const current = useAppStore.getState().layers;
+      const index = current.findIndex((item) => item.id === layer.id);
+      if (index === -1) continue;
+      if (hasLidarPointCloud(layer.id) || isLidarRestorePending(layer)) continue;
+
+      const entry: PendingLidarRestore = {
+        layerId: layer.id,
+        name: layer.name,
+        visible: layer.visible,
+        opacity: layer.opacity,
+        style: layer.style,
+        groupId: layer.groupId,
+        beforeLayerId: current[index + 1]?.id ?? null,
+      };
+      const queue = pendingLidarRestores.get(url);
+      if (queue) queue.push(entry);
+      else pendingLidarRestores.set(url, [entry]);
+      lidarControl.loadPointCloud(url).catch((error: unknown) => {
+        // Drop only this layer's entry so a sibling restore for the same URL is
+        // not lost; clean up the map key once its queue empties.
+        const remaining = pendingLidarRestores.get(url);
+        if (remaining) {
+          const at = remaining.indexOf(entry);
+          if (at !== -1) remaining.splice(at, 1);
+          if (remaining.length === 0) pendingLidarRestores.delete(url);
+        }
+        console.warn("[lidar] failed to restore point cloud", url, error);
+      });
+    }
+  } finally {
+    lidarRestoreInFlight = false;
+  }
 }
 
 async function openStandaloneSplattingControl(
@@ -3297,6 +3419,10 @@ function setHtmlPanelVisible(visible: boolean): void {
 
 function teardownLidarControl(app: GeoLibreAppAPI): void {
   stopLidarThemeSync();
+  // Clear restore bookkeeping so a teardown mid-restore (project reload, map
+  // re-init) cannot strand the in-flight guard and block later restores.
+  pendingLidarRestores.clear();
+  lidarRestoreInFlight = false;
   lidarStoreUnsubscribe?.();
   lidarStoreUnsubscribe = null;
   lidarLayerAdapter?.destroy();
@@ -3326,6 +3452,54 @@ function createLidarLoadHandler(): LidarControlEventHandler {
 
     const store = useAppStore.getState();
     const layer = createLidarStoreLayer(event.pointCloud);
+
+    // Project restore: this load was triggered to re-stream a saved layer (see
+    // restoreLidarLayers). loadPointCloud assigns a fresh id, so swap the inert
+    // placeholder (saved id) for the loaded layer in place, carrying over the
+    // saved visibility, opacity, style, name, and position.
+    const restoreKey =
+      typeof event.pointCloud.source === "string"
+        ? event.pointCloud.source
+        : null;
+    const restoreQueue = restoreKey
+      ? pendingLidarRestores.get(restoreKey)
+      : undefined;
+    const restore = restoreQueue?.shift();
+    if (restore && restoreKey) {
+      if (restoreQueue && restoreQueue.length === 0) {
+        pendingLidarRestores.delete(restoreKey);
+      }
+      const restored: GeoLibreLayer = {
+        ...layer,
+        name: restore.name || layer.name,
+        visible: restore.visible,
+        opacity: restore.opacity,
+        style: restore.style,
+        ...(restore.groupId ? { groupId: restore.groupId } : {}),
+      };
+      if (
+        restore.layerId !== restored.id &&
+        store.layers.some((item) => item.id === restore.layerId)
+      ) {
+        store.removeLayer(restore.layerId);
+      }
+      const beforeLayerId =
+        restore.beforeLayerId &&
+        useAppStore
+          .getState()
+          .layers.some((item) => item.id === restore.beforeLayerId)
+          ? restore.beforeLayerId
+          : null;
+      store.addLayer(restored, beforeLayerId);
+      if (!restored.visible) {
+        lidarLayerAdapter?.setVisibility(restored.id, false);
+      }
+      if (restored.opacity !== 1) {
+        lidarLayerAdapter?.setOpacity(restored.id, restored.opacity);
+      }
+      return;
+    }
+
     if (store.layers.some((item) => item.id === layer.id)) {
       store.updateLayer(layer.id, {
         metadata: layer.metadata,
