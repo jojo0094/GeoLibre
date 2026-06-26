@@ -80,7 +80,11 @@ import {
 import { useLanguage } from "../../hooks/useLanguage";
 import type { ThemeMode } from "../../hooks/useThemeMode";
 import { isTauri } from "../../lib/is-tauri";
-import { THEME_SCHEMES, type ThemeScheme } from "../../lib/theme-schemes";
+import {
+  THEME_SCHEMES,
+  normalizeHexColor,
+  type ThemeScheme,
+} from "../../lib/theme-schemes";
 import type { UpdateNotificationLevel } from "../../lib/updates";
 import {
   DATA_SOURCE_CATALOG,
@@ -469,6 +473,12 @@ export function SettingsDialog({
       // focus RAF fires, a leftover target would otherwise fire on a later
       // open that never asked for it.
       setPendingFocus(null);
+      // Discard any uncommitted hex text so a half-typed/invalid value never
+      // resurfaces on the next open (the swatch already shows the saved color),
+      // and clear the Escape skip flag so a leftover true can't swallow the
+      // first edit of the next session.
+      skipCustomColorCommitRef.current = false;
+      setCustomColorDraft(null);
       return;
     }
     const seededPreferences = clonePreferences(
@@ -795,6 +805,28 @@ export function SettingsDialog({
       ...current,
       theme: { ...current.theme, scheme: "custom", customColor },
     });
+  };
+
+  // In-progress text for the inline hex field next to the swatch. While the user
+  // is typing or pasting a code it holds the raw string; `null` means the field
+  // mirrors the saved color. On commit a valid 3- or 6-digit hex applies and an
+  // invalid one is discarded, so the field reverts to the last valid color (#911).
+  const [customColorDraft, setCustomColorDraft] = useState<string | null>(null);
+  // Set just before the Escape-triggered blur so the imminent blur discards the
+  // draft instead of committing it: the dialog still closes (its own Escape
+  // handler), but the typed value is cancelled rather than applied on the way out.
+  const skipCustomColorCommitRef = useRef(false);
+
+  const commitCustomColorDraft = () => {
+    if (skipCustomColorCommitRef.current) {
+      skipCustomColorCommitRef.current = false;
+      setCustomColorDraft(null);
+      return;
+    }
+    if (customColorDraft === null) return;
+    const normalized = normalizeHexColor(customColorDraft);
+    if (normalized) updateSavedThemeCustomColor(normalized);
+    setCustomColorDraft(null);
   };
 
   const updateDraftUpdateSettings = (patch: Partial<UpdateSettings>) => {
@@ -1685,9 +1717,61 @@ export function SettingsDialog({
                           aria-label={t("settings.appearance.customColor")}
                         />
                         <span>{t("settings.appearance.customColor")}</span>
-                        <code className="ml-auto text-xs uppercase text-muted-foreground">
-                          {desktopSettings.theme.customColor}
-                        </code>
+                        {/* Inline hex entry so power users can type or paste an
+                            exact code instead of only dragging the native picker.
+                            The text input is interactive content, so a click lands
+                            here and focuses it rather than reopening the picker the
+                            wrapping label drives (#911). */}
+                        <input
+                          type="text"
+                          spellCheck={false}
+                          autoComplete="off"
+                          className="ml-auto w-24 rounded border bg-transparent px-2 py-1 text-right font-mono text-xs uppercase text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-[invalid=true]:border-destructive aria-[invalid=true]:text-destructive"
+                          value={
+                            customColorDraft ??
+                            desktopSettings.theme.customColor
+                          }
+                          // The field already holds a full `#rrggbb`, so select
+                          // all on focus to let the user type a replacement.
+                          onFocus={(event) => event.target.select()}
+                          // Drop whitespace and cap to the longest valid form
+                          // (`#rrggbb`) as the draft is stored, so a padded or
+                          // oversized paste is sanitized in place instead of
+                          // sitting clobbered; this also bounds a runaway paste
+                          // without a brittle maxLength that has to guess how
+                          // much surrounding whitespace to allow.
+                          onChange={(event) =>
+                            setCustomColorDraft(
+                              event.target.value.replace(/\s/g, "").slice(0, 7),
+                            )
+                          }
+                          onBlur={commitCustomColorDraft}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              // Blur is the single commit path; the resulting
+                              // onBlur applies/reverts the draft, so don't also
+                              // commit here and double-write the same value.
+                              event.preventDefault();
+                              event.currentTarget.blur();
+                            } else if (event.key === "Escape") {
+                              // Cancel the edit: flag the commit to skip, then
+                              // blur so the value is dropped, not applied. The
+                              // dialog's own Escape handling still closes it.
+                              skipCustomColorCommitRef.current = true;
+                              event.currentTarget.blur();
+                            }
+                          }}
+                          aria-label={t("settings.appearance.customColorHex")}
+                          // `|| undefined` omits the attribute entirely when
+                          // valid; a literal aria-invalid="false" makes some
+                          // screen readers announce "invalid: false" on focus.
+                          aria-invalid={
+                            (customColorDraft !== null &&
+                              customColorDraft.trim() !== "" &&
+                              normalizeHexColor(customColorDraft) === null) ||
+                            undefined
+                          }
+                        />
                       </label>
                     ) : null}
                   </div>
