@@ -143,12 +143,68 @@ describe("installGlobePopupOcclusion", () => {
     );
   });
 
-  it("suppresses interaction for zero opacity strings", () => {
+  // Real browsers normalize " 0 " to "0"; the fake container stores it verbatim.
+  for (const opacity of ["0", "0.0", " 0 "]) {
+    it(`suppresses interaction for zero opacity string ${opacity}`, () => {
+      const maplibre = createMaplibreStub();
+      installGlobePopupOcclusion(maplibre);
+
+      const popup = new maplibre.Popup({
+        locationOccludedOpacity: opacity,
+      }) as maplibregl.Popup & {
+        _container: HTMLElement;
+        _map: { transform: { isLocationOccluded: () => boolean } };
+        _updateOpacity: () => void;
+      };
+
+      popup._map.transform.isLocationOccluded = () => true;
+      popup._updateOpacity();
+
+      assert.equal(popup._container.style.opacity, opacity);
+      assert.equal(popup._container.style.pointerEvents, "none");
+      assert.equal(popup._container.style.visibility, "hidden");
+      assert.equal(
+        popup._container.classList.contains(GLOBE_POPUP_OCCLUDED_CLASS),
+        true,
+      );
+    });
+  }
+
+  for (const opacity of ["", " "]) {
+    // Browsers reject " " as CSS opacity; the fake container stores it verbatim.
+    it(`does not suppress interaction for blank opacity ${JSON.stringify(
+      opacity,
+    )}`, () => {
+      const maplibre = createMaplibreStub();
+      installGlobePopupOcclusion(maplibre);
+
+      const popup = new maplibre.Popup({
+        locationOccludedOpacity: opacity,
+      }) as maplibregl.Popup & {
+        _container: HTMLElement;
+        _map: { transform: { isLocationOccluded: () => boolean } };
+        _updateOpacity: () => void;
+      };
+
+      popup._map.transform.isLocationOccluded = () => true;
+      popup._updateOpacity();
+
+      assert.equal(popup._container.style.opacity, opacity);
+      assert.equal(popup._container.style.pointerEvents, "auto");
+      assert.equal(popup._container.style.visibility, "visible");
+      assert.equal(
+        popup._container.classList.contains(GLOBE_POPUP_OCCLUDED_CLASS),
+        false,
+      );
+    });
+  }
+
+  it("does not suppress interaction for non-decimal zero opacity strings", () => {
     const maplibre = createMaplibreStub();
     installGlobePopupOcclusion(maplibre);
 
     const popup = new maplibre.Popup({
-      locationOccludedOpacity: "0.0",
+      locationOccludedOpacity: "0e0",
     }) as maplibregl.Popup & {
       _container: HTMLElement;
       _map: { transform: { isLocationOccluded: () => boolean } };
@@ -158,9 +214,13 @@ describe("installGlobePopupOcclusion", () => {
     popup._map.transform.isLocationOccluded = () => true;
     popup._updateOpacity();
 
-    assert.equal(popup._container.style.opacity, "0.0");
-    assert.equal(popup._container.style.pointerEvents, "none");
-    assert.equal(popup._container.style.visibility, "hidden");
+    assert.equal(popup._container.style.opacity, "0e0");
+    assert.equal(popup._container.style.pointerEvents, "auto");
+    assert.equal(popup._container.style.visibility, "visible");
+    assert.equal(
+      popup._container.classList.contains(GLOBE_POPUP_OCCLUDED_CLASS),
+      false,
+    );
   });
 
   it("calls isLocationOccluded with the transform receiver", () => {
